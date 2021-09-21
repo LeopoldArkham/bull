@@ -1,8 +1,10 @@
 extern crate rustygit;
 extern crate rm_rf;
 
+use std::io::prelude::*;
 use std::process::Command;
 use std::error::Error;
+use std::net::TcpListener;
 
 mod read_config;
 
@@ -42,9 +44,21 @@ fn initialize(recipes: &Vec<Recipe>) -> Result<(), Box<dyn Error>> {
 
 fn main() -> std::io::Result<(), > {
     let _ = rm_rf::ensure_removed("./repos");
+    // let recipes: Vec<Recipe> = read_config()?.recipes;
+    let listener = TcpListener::bind("127.0.0.1:6000").unwrap();
 
-    let recipes: Vec<Recipe> = read_config()?.recipes;
-    initialize(&recipes).unwrap();
+    for stream in listener.incoming() {
+        let mut stream = stream.unwrap();
+        let mut buffer = [0; 20_000];
+        println!("Connection established!");
+        stream.read(&mut buffer).unwrap();
+
+        let res = String::from_utf8_lossy(&buffer);
+        
+        println!("{}", res);
+
+    }
+    
 
     Ok(())
 }
