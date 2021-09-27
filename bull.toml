@@ -1,9 +1,9 @@
 [[recipes]]
 repository_url = "https://github.com/LeopoldArkham/humansize.git"
 branch = "deploy-test"
-build = "cargo build"
+build = ["cargo", "build"]
 
 [[recipes]]
 repository_url = "https://github.com/LeopoldArkham/Dummy.git"
 branch = "master"
-build = "echo built"
+build = ["echo", "balls"]

@@ -1,14 +1,15 @@
-extern crate rustygit;
-extern crate rm_rf;
 extern crate httparse;
+extern crate rm_rf;
+extern crate rustygit;
 extern crate serde_derive;
 extern crate serde_json;
+extern crate regex;
 
-use std::io::prelude::*;
 use std::collections::HashMap;
-use std::process::Command;
 use std::error::Error;
+use std::io::prelude::*;
 use std::net::TcpListener;
+use std::process::Command;
 
 mod read_config;
 
@@ -19,99 +20,176 @@ use httparse::Request;
 use rustygit::types::BranchName;
 use std::str::FromStr;
 
-use read_config::{read_config, Recipe};
+use read_config::{read_recipes, Recipe};
 use rustygit::types::GitUrl;
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq)]
 struct Target {
-    repoository_name: String,
-    branch_name: String
+    repository_name: String,
+    branch_name: String,
 }
 
-type Repos = HashMap<Target, rustygit::Repository>;
+fn get_context_dir(name: &str) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    let mut dir = std::env::current_dir()?;
+    dir.push("repos");
+    dir.push(name);
+
+    Ok(dir)
+}
+
+struct Repository {
+    recipe: Recipe,
+    repository: rustygit::Repository
+}
+
+impl std::fmt::Debug for Repository {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result  {
+        f.debug_struct("Repository").field("Branch name", &self.recipe.branch).finish()
+    }
+}
+
+type Repos = HashMap<Target, Repository>;
 
 // Goes through the list of recipes and clones all the repos
-fn initialize(recipes: &Vec<Recipe>) -> Result<(), Box<dyn Error>> {
+fn initialize_repos(recipes: &Vec<Recipe>) -> Result<Repos, Box<dyn Error>> {
+    let _ = rm_rf::ensure_removed("./repos");
+
+    let mut repos: Repos = HashMap::new();
     for recipe in recipes {
         let name = recipe.repository_url.split('/').last().unwrap();
+        let name = match name.strip_suffix(".git") {
+            Some(s) => s,
+            None=> name
+        };
         let path = format!("{}/{}", "repos", name);
-
         let repo = rustygit::Repository::clone(GitUrl::from_str(&recipe.repository_url)?, path)?;
-
-        // Apparently not necessary
-        repo.fetch_remote(&recipe.repository_url)?;
-
         let _ = repo.switch_branch(&BranchName::from_str(&recipe.branch).unwrap());
-        println!("{:?}", repo.list_branches());
-        
-        let mut context_dir = std::env::current_dir()?;
-        context_dir.push("repos");
-        context_dir.push(name);
-
-        println!("Context directory: {:?}", context_dir);
-        
-        let status = Command::new("cargo").arg("build").current_dir(context_dir).status()?;
-
-        println!("{:?}", status)
+        let target = Target {
+            repository_name: name.to_string(),
+            branch_name: recipe.branch.clone(),
+        };
+        repos.insert(target, Repository { recipe: recipe.clone(), repository: repo});
     }
-    return Ok(());
+
+    Ok(repos)
 }
 
 #[derive(Debug, Deserialize)]
-struct Repository {
-    name: String
+struct WHRepository {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct Webhook {
     r#ref: String,
-    repository: Repository,
+    repository: WHRepository,
 }
 
-fn main() -> std::io::Result<(), > {
-    let repos = read_config();
+fn initialize() -> Result<Repos, Box<dyn Error>> {
+    let recipes = read_recipes()?.recipes;
+    let repositories = initialize_repos(&recipes)?;
+
+    Ok(repositories)
+}
+
+fn handle_target(target: Target, repos: &mut Repos) -> Result<(), Box<dyn Error>> {
+    if  let Some(repo) = repos.get(&target) {
+        repo.repository.switch_branch(&BranchName::from_str(&target.branch_name)?)?;
+        let context_dir = get_context_dir(&target.repository_name)?;
+        let mut cmd = Command::new(repo.recipe.build[0].clone());
+        let cmd = cmd.args(&repo.recipe.build[1..]).current_dir(context_dir);
+        let status = cmd.status();
+        println!("Build exited with status: {:?}", status)
+    }
+    else {
+        println!("No match found for target {:?}", target)
+    }
 
     Ok(())
 }
 
-// fn main() -> std::io::Result<(), > {
-//     let _ = rm_rf::ensure_removed("./repos");
-//     // let recipes: Vec<Recipe> = read_config()?.recipes;
-//     let listener = TcpListener::bind("127.0.0.1:6000").unwrap();
+fn main() -> Result<(), Box<dyn Error>> {
+    println!("Initializing repos");
+    let mut repos = initialize()?;
+    println!("{:?}", repos);
+    let listener = listen_for_webhooks()?;
 
-//     for stream in listener.incoming() {
-//         let mut stream = stream.unwrap();
-//         let mut buffer = [0; 20_000];
-//         let mut headers = [httparse::EMPTY_HEADER; 20];
-//         println!("\n\n");
-//         let bytes_read = stream.read(&mut buffer).unwrap();
+    println!("Listening on port 6000");
+    for stream in listener.incoming() {
+        let target = parse_incoming_webhook(stream.unwrap())?;
+        if let Some(target) = target {
+            handle_target(target, &mut repos)?;
+        }
+    }
 
-//         let offset = Request::new(&mut headers).parse(&buffer).unwrap().unwrap();
+    Ok(())
+}
 
-//         // println!("Hopefully body: {}", String::from_utf8_lossy(&buffer[offset..]));
-//         let body = String::from_utf8_lossy(&buffer[offset..bytes_read]).to_string();
-//         println!("Body: {:?}", &body[body.len() - 1..]);
-//         println!("Body length: {:?}", body.len());
-//         let maybe_parsed_webhook: Webhook = serde_json::from_str(&body)?;
-//         println!("Parsed: {:?}", maybe_parsed_webhook);
+#[derive(Debug)]
+struct ParseRefError {
+    msg: String,
+}
 
-//         println!("------------------------------------------------");
+impl std::fmt::Display for ParseRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Failed to extract branch name from ref")
+    }
+}
 
-//     }
-    
+impl Error for ParseRefError {}
 
-//     Ok(())
-// }
+fn get_branch_name_from_ref(gitref: String) -> Result<String, Box<dyn Error>> {
+    let re = regex::Regex::new(r"refs/heads/(?P<branch_name>.*)")?;
+    if let Some(caps) = re.captures(&gitref) {
+        if let Some(branch_name) = caps.name("branch_name") {
+            let res = branch_name.as_str().into();
+            println!("Branch: {:?}", res);
+            return Ok(res);
+        }
+        else {
+            return Err(Box::new(ParseRefError { msg: String::from("Oh no") } )); 
+        }
+    }
+    else {
+        return Err(Box::new(ParseRefError { msg: String::from("Oh no") } ));
+    }
+}
 
+fn parse_incoming_webhook(
+    mut stream: std::net::TcpStream,
+) -> Result<Option<Target>, Box<dyn Error>> {
+    println!("------------------------------------------------");
+    println!("--------------- Incoming Webhook ---------------");
+    println!("------------------------------------------------\n");
 
-/*
- * main {
- *   read_config
- *   loop over tcp incoming {
- *     if name and branch in config {
- *       pull updated repo
- *       build it++
- *     } 
- *   }
- * }
- */
+    let mut buffer = [0; 20_000];
+    let mut headers = [httparse::EMPTY_HEADER; 20];
+
+    let nb_bytes_read = stream.read(&mut buffer).unwrap();
+
+    let res =
+        if let httparse::Status::Complete(offset) = Request::new(&mut headers).parse(&buffer)? {
+            let body = String::from_utf8_lossy(&buffer[offset..nb_bytes_read]).to_string();
+            let parsed_webhook: Webhook = serde_json::from_str(&body)?;
+            println!(
+                "Parsed a webhook for: {:?} at ref {:?}",
+                parsed_webhook.repository.name, parsed_webhook.r#ref
+            );
+            Ok(Some(Target {
+                repository_name: parsed_webhook.repository.name,
+                branch_name: get_branch_name_from_ref(parsed_webhook.r#ref)?,
+            }))
+        } else {
+            println!("Failed to parse the incoming request as a GitHub webhook.");
+            Ok(None)
+        };
+
+    println!("\n................................................\n\n");
+    res
+}
+
+fn listen_for_webhooks() -> std::io::Result<std::net::TcpListener> {
+    // let recipes: Vec<Recipe> = read_config()?.recipes;
+    let listener = TcpListener::bind("127.0.0.1:6000").unwrap();
+    Ok(listener)
+}

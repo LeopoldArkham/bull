@@ -16,6 +16,7 @@ name = "bull"
 version = "0.1.0"
 dependencies = [
  "httparse",
+ "regex",
  "rm_rf",
  "rustygit",
  "serde",

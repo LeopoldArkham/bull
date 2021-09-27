@@ -5,22 +5,23 @@ use serde_derive::Deserialize;
 
 use std::fs;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Recipe {
     pub repository_url: String,
     pub branch: String,
-    pub build: String,
+    pub build: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Config {
+#[derive(Debug, Deserialize, Clone)]
+pub struct Recipes {
     pub recipes: Vec<Recipe>,
 }
 
-pub fn read_config() -> Result<Config, std::io::Error> {
-  let config_raw = fs::read_to_string("./bull.toml")?;
 
-  let config: Config = toml::from_str(&config_raw)?;
+pub fn read_recipes() -> Result<Recipes, std::io::Error> {
+    let config_raw = fs::read_to_string("./bull.toml")?;
 
-  return Ok(config);
+    let recipes = toml::from_str(&config_raw)?;
+
+    return Ok(recipes);
 }
