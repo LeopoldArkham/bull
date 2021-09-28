@@ -1,9 +1,21 @@
 [[recipes]]
 repository_url = "https://github.com/LeopoldArkham/humansize.git"
 branch = "deploy-test"
-build = ["cargo", "build"]
+build = [["cargo", "build"]]
+
+
+[[recipes]]
+repository_url = "https://github.com/LeopoldArkham/whatsapp-archive-viewer.git"
+branch = "master"
+build = [
+  ["npm", "ci"],
+  ["npm", "run", "build"],
+]
+  [recipes.host]
+  port = 1000
+  path = "dist"
 
 [[recipes]]
 repository_url = "https://github.com/LeopoldArkham/Dummy.git"
 branch = "master"
-build = ["echo", "balls"]
+build = [["echo", "balls"]]

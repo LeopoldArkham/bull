@@ -1,10 +1,3 @@
-extern crate httparse;
-extern crate rm_rf;
-extern crate rustygit;
-extern crate serde_derive;
-extern crate serde_json;
-extern crate regex;
-
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::prelude::*;
@@ -23,7 +16,7 @@ use std::str::FromStr;
 use read_config::{read_recipes, Recipe};
 use rustygit::types::GitUrl;
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 struct Target {
     repository_name: String,
     branch_name: String,
@@ -91,15 +84,59 @@ fn initialize() -> Result<Repos, Box<dyn Error>> {
 
     Ok(repositories)
 }
+fn serve_static_files(port: u16, path: String) -> Result<(), Box<dyn Error>> {
+    // let listener = std::net::TcpListener::bind(format!("localhost:{}", port))?;
+    
+    // for stream in listener.incoming() {
+    //     let mut stream = stream.unwrap();
 
-fn handle_target(target: Target, repos: &mut Repos) -> Result<(), Box<dyn Error>> {
+    //     let response = "HTTP/1.1 200 OK\r\n\r\n";
+
+    //     stream.write(response.as_bytes())?;
+    //     stream.flush()?;
+    // }
+
+    let mut mount = mount::Mount::new();
+    // let handler = staticfile::Static::new(std::path::Path::new(&path));
+    let handler = staticfile::Static::new(std::path::Path::new("~/Documents"));
+    mount.mount("", handler);
+    iron::Iron::new(mount).http(("127.0.0.1", port)).expect("Failed to serve");
+    
+    Ok(())
+}
+
+// See this page for an alternative way of running complex commands on *NIX and Windows
+// https://doc.rust-lang.org/std/process/struct.Command.html
+fn handle_target(target: Target, repos: &Repos) -> Result<(), Box<dyn Error>> {
     if  let Some(repo) = repos.get(&target) {
         repo.repository.switch_branch(&BranchName::from_str(&target.branch_name)?)?;
         let context_dir = get_context_dir(&target.repository_name)?;
-        let mut cmd = Command::new(repo.recipe.build[0].clone());
-        let cmd = cmd.args(&repo.recipe.build[1..]).current_dir(context_dir);
-        let status = cmd.status();
-        println!("Build exited with status: {:?}", status)
+
+        // First run all the build steps, if any
+        if let Some(commands) = &repo.recipe.build {
+            for command in commands {
+                let mut cmd = Command::new(command[0].clone());
+                let cmd = cmd.args(&command[1..]).current_dir(&context_dir);
+                let status = cmd.status();
+                println!("A build command exited with status: {:?}", status)
+            }
+        }
+        
+        // Determine if we are running in "Host" or in "Run" mode
+        if let Some(host_settings) = &repo.recipe.host {
+            let static_files_path = format!("{}/{}", context_dir.to_str().unwrap(), host_settings.path);
+            println!("{}", static_files_path);
+            let port = host_settings.port;
+            let _thread_handle = std::thread::spawn(move || {
+                let _ = serve_static_files(port, static_files_path);
+            });
+        }
+        else if let Some(_run_settings) = &repo.recipe.run {
+            unimplemented!();
+        }
+        else {
+            unreachable!("Targets must provide either a host or a run config")
+        }
     }
     else {
         println!("No match found for target {:?}", target)
@@ -110,15 +147,14 @@ fn handle_target(target: Target, repos: &mut Repos) -> Result<(), Box<dyn Error>
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Initializing repos");
-    let mut repos = initialize()?;
-    println!("{:?}", repos);
+    let repos = initialize()?;
     let listener = listen_for_webhooks()?;
 
     println!("Listening on port 6000");
     for stream in listener.incoming() {
         let target = parse_incoming_webhook(stream.unwrap())?;
         if let Some(target) = target {
-            handle_target(target, &mut repos)?;
+            handle_target(target, &repos)?;
         }
     }
 
@@ -170,6 +206,7 @@ fn parse_incoming_webhook(
     let res =
         if let httparse::Status::Complete(offset) = Request::new(&mut headers).parse(&buffer)? {
             let body = String::from_utf8_lossy(&buffer[offset..nb_bytes_read]).to_string();
+            // if an error occurs around here, the webhook may not have the right content type (application/json)
             let parsed_webhook: Webhook = serde_json::from_str(&body)?;
             println!(
                 "Parsed a webhook for: {:?} at ref {:?}",
@@ -189,7 +226,6 @@ fn parse_incoming_webhook(
 }
 
 fn listen_for_webhooks() -> std::io::Result<std::net::TcpListener> {
-    // let recipes: Vec<Recipe> = read_config()?.recipes;
     let listener = TcpListener::bind("127.0.0.1:6000").unwrap();
     Ok(listener)
 }
