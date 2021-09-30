@@ -54,7 +54,7 @@ fn initialize_repos(recipes: &Vec<Recipe>) -> Result<Repos, Box<dyn Error>> {
             Some(s) => s,
             None=> name
         };
-        let path = format!("{}/{}", "repos", name);
+        let path = format!("{}\\{}", "repos", name);
         let repo = rustygit::Repository::clone(GitUrl::from_str(&recipe.repository_url)?, path)?;
         let _ = repo.switch_branch(&BranchName::from_str(&recipe.branch).unwrap());
         let target = Target {
@@ -85,22 +85,12 @@ fn initialize() -> Result<Repos, Box<dyn Error>> {
     Ok(repositories)
 }
 fn serve_static_files(port: u16, path: String) -> Result<(), Box<dyn Error>> {
-    // let listener = std::net::TcpListener::bind(format!("localhost:{}", port))?;
-    
-    // for stream in listener.incoming() {
-    //     let mut stream = stream.unwrap();
-
-    //     let response = "HTTP/1.1 200 OK\r\n\r\n";
-
-    //     stream.write(response.as_bytes())?;
-    //     stream.flush()?;
-    // }
-
     let mut mount = mount::Mount::new();
-    // let handler = staticfile::Static::new(std::path::Path::new(&path));
-    let handler = staticfile::Static::new(std::path::Path::new("~/Documents"));
+    let handler = staticfile::Static::new(std::path::Path::new(&path));
+    println!("Passed making the handler");
     mount.mount("", handler);
     iron::Iron::new(mount).http(("127.0.0.1", port)).expect("Failed to serve");
+    println!("Listening");
     
     Ok(())
 }
@@ -110,21 +100,22 @@ fn serve_static_files(port: u16, path: String) -> Result<(), Box<dyn Error>> {
 fn handle_target(target: Target, repos: &Repos) -> Result<(), Box<dyn Error>> {
     if  let Some(repo) = repos.get(&target) {
         repo.repository.switch_branch(&BranchName::from_str(&target.branch_name)?)?;
+
         let context_dir = get_context_dir(&target.repository_name)?;
 
         // First run all the build steps, if any
         if let Some(commands) = &repo.recipe.build {
             for command in commands {
-                let mut cmd = Command::new(command[0].clone());
-                let cmd = cmd.args(&command[1..]).current_dir(&context_dir);
+                let mut cmd = Command::new("cmd");
+                let cmd = cmd.arg("/C").args(command).current_dir(&context_dir);
                 let status = cmd.status();
-                println!("A build command exited with status: {:?}", status)
+                println!("\n\nA build command exited with status: {:?}", status)
             }
         }
         
         // Determine if we are running in "Host" or in "Run" mode
         if let Some(host_settings) = &repo.recipe.host {
-            let static_files_path = format!("{}/{}", context_dir.to_str().unwrap(), host_settings.path);
+            let static_files_path = format!("{}\\{}", context_dir.to_str().unwrap(), host_settings.path);
             println!("{}", static_files_path);
             let port = host_settings.port;
             let _thread_handle = std::thread::spawn(move || {
@@ -221,7 +212,7 @@ fn parse_incoming_webhook(
             Ok(None)
         };
 
-    println!("\n................................................\n\n");
+    println!("\n------------------------------------------------\n\n");
     res
 }
 
