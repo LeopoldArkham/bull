@@ -176,10 +176,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Initializing repos...");
     let mut repos = initialize()?;
-    println!("Done.");
+    println!("Done.\n");
 
     let listener = listen_for_webhooks()?;
-    println!("Listening on port 6000");
+    println!("Listening on port 6000\n");
 
     for stream in listener.incoming() {
         let target = parse_incoming_webhook(stream.unwrap())?;
