@@ -31,37 +31,101 @@ fn get_context_dir(name: &str) -> Result<std::path::PathBuf, Box<dyn Error>> {
 }
 
 struct Repository {
+    name: String,
     recipe: Recipe,
-    repository: rustygit::Repository
+    git_interface: rustygit::Repository,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Repository {
+    fn new(recipe: Recipe) -> Result<Repository, Box<dyn Error>> {
+        let name = recipe.repository_url.split('/').last().unwrap();
+        let name = match name.strip_suffix(".git") {
+            Some(s) => s,
+            None => name,
+        };
+
+        let path = format!("{}\\{}", "repos", name);
+        let git_interface =
+            rustygit::Repository::clone(GitUrl::from_str(&recipe.repository_url)?, path)?;
+        let _ = git_interface.switch_branch(&BranchName::from_str(&recipe.branch)?);
+
+        Ok(Repository {
+            name: name.to_string(),
+            recipe,
+            git_interface,
+            thread_handle: None,
+        })
+    }
+
+    fn deploy(&mut self) -> Result<(), Box<dyn Error>> {
+        let context_dir = get_context_dir(&self.name)?;
+
+        // First run all the build steps, if any
+        if let Some(commands) = &self.recipe.build {
+            for command in commands {
+                let status = if cfg!(windows) {
+                    let mut cmd = Command::new("cmd");
+                    let cmd = cmd.arg("/C").args(command).current_dir(&context_dir);
+                    cmd.status()
+                } else {
+                    let mut cmd = Command::new(&command[0]);
+                    let cmd = cmd.args(&command[1..]).current_dir(&context_dir);
+                    println!("Command to be run: {:?}", cmd);
+                    cmd.status()
+                };
+
+                println!("\n\nA build command exited with status: {:?}", status)
+            }
+        }
+
+        // Determine if we are running in "Host" or in "Run" mode
+        if let Some(host_settings) = &self.recipe.host {
+            let static_files_path =
+                format!("{}\\{}", context_dir.to_str().unwrap(), host_settings.path);
+            let port = host_settings.port;
+            self.thread_handle = Some(std::thread::spawn(move || {
+                let _ = serve_static_files(port, static_files_path);
+            }));
+
+            Ok(())
+        } else if let Some(_run_settings) = &self.recipe.run {
+            unimplemented!();
+        } else {
+            unreachable!("Targets must provide either a host or a run config")
+        }
+    }
 }
 
 impl std::fmt::Debug for Repository {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result  {
-        f.debug_struct("Repository").field("Branch name", &self.recipe.branch).finish()
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("Repository")
+            .field("Branch name", &self.recipe.branch)
+            .finish()
     }
 }
 
 type Repos = HashMap<Target, Repository>;
 
 // Goes through the list of recipes and clones all the repos
-fn initialize_repos(recipes: &Vec<Recipe>) -> Result<Repos, Box<dyn Error>> {
+fn initialize_repos(recipes: Vec<Recipe>) -> Result<Repos, Box<dyn Error>> {
     let _ = rm_rf::ensure_removed("./repos");
 
     let mut repos: Repos = HashMap::new();
     for recipe in recipes {
+        // todo: duplicated in Reposiory impl
         let name = recipe.repository_url.split('/').last().unwrap();
         let name = match name.strip_suffix(".git") {
             Some(s) => s,
-            None=> name
+            None => name,
         };
-        let path = format!("{}\\{}", "repos", name);
-        let repo = rustygit::Repository::clone(GitUrl::from_str(&recipe.repository_url)?, path)?;
-        let _ = repo.switch_branch(&BranchName::from_str(&recipe.branch).unwrap());
+
         let target = Target {
             repository_name: name.to_string(),
             branch_name: recipe.branch.clone(),
         };
-        repos.insert(target, Repository { recipe: recipe.clone(), repository: repo});
+
+        repos.insert(target, Repository::new(recipe)?);
     }
 
     Ok(repos)
@@ -80,72 +144,47 @@ struct Webhook {
 
 fn initialize() -> Result<Repos, Box<dyn Error>> {
     let recipes = read_recipes()?.recipes;
-    let repositories = initialize_repos(&recipes)?;
+    let repositories = initialize_repos(recipes)?;
 
     Ok(repositories)
 }
+
 fn serve_static_files(port: u16, path: String) -> Result<(), Box<dyn Error>> {
     let mut mount = mount::Mount::new();
     let handler = staticfile::Static::new(std::path::Path::new(&path));
-    println!("Passed making the handler");
     mount.mount("", handler);
-    iron::Iron::new(mount).http(("127.0.0.1", port)).expect("Failed to serve");
+    iron::Iron::new(mount)
+        .http(("127.0.0.1", port))
+        .expect("Failed to serve");
     println!("Listening");
-    
+
     Ok(())
 }
 
 // See this page for an alternative way of running complex commands on *NIX and Windows
 // https://doc.rust-lang.org/std/process/struct.Command.html
-fn handle_target(target: Target, repos: &Repos) -> Result<(), Box<dyn Error>> {
-    if  let Some(repo) = repos.get(&target) {
-        repo.repository.switch_branch(&BranchName::from_str(&target.branch_name)?)?;
-
-        let context_dir = get_context_dir(&target.repository_name)?;
-
-        // First run all the build steps, if any
-        if let Some(commands) = &repo.recipe.build {
-            for command in commands {
-                let mut cmd = Command::new("cmd");
-                let cmd = cmd.arg("/C").args(command).current_dir(&context_dir);
-                let status = cmd.status();
-                println!("\n\nA build command exited with status: {:?}", status)
-            }
-        }
-        
-        // Determine if we are running in "Host" or in "Run" mode
-        if let Some(host_settings) = &repo.recipe.host {
-            let static_files_path = format!("{}\\{}", context_dir.to_str().unwrap(), host_settings.path);
-            println!("{}", static_files_path);
-            let port = host_settings.port;
-            let _thread_handle = std::thread::spawn(move || {
-                let _ = serve_static_files(port, static_files_path);
-            });
-        }
-        else if let Some(_run_settings) = &repo.recipe.run {
-            unimplemented!();
-        }
-        else {
-            unreachable!("Targets must provide either a host or a run config")
-        }
+fn handle_target(target: Target, repos: &mut Repos) -> Result<(), Box<dyn Error>> {
+    if let Some(repo) = repos.get_mut(&target) {
+        repo.deploy()
+    } else {
+        unimplemented!()
     }
-    else {
-        println!("No match found for target {:?}", target)
-    }
-
-    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Initializing repos");
-    let repos = initialize()?;
-    let listener = listen_for_webhooks()?;
+    let _ = rm_rf::ensure_removed("repos");
 
+    println!("Initializing repos...");
+    let mut repos = initialize()?;
+    println!("Done.");
+
+    let listener = listen_for_webhooks()?;
     println!("Listening on port 6000");
+
     for stream in listener.incoming() {
         let target = parse_incoming_webhook(stream.unwrap())?;
         if let Some(target) = target {
-            handle_target(target, &repos)?;
+            handle_target(target, &mut repos)?;
         }
     }
 
@@ -172,13 +211,15 @@ fn get_branch_name_from_ref(gitref: String) -> Result<String, Box<dyn Error>> {
             let res = branch_name.as_str().into();
             println!("Branch: {:?}", res);
             return Ok(res);
+        } else {
+            return Err(Box::new(ParseRefError {
+                msg: String::from("Oh no"),
+            }));
         }
-        else {
-            return Err(Box::new(ParseRefError { msg: String::from("Oh no") } )); 
-        }
-    }
-    else {
-        return Err(Box::new(ParseRefError { msg: String::from("Oh no") } ));
+    } else {
+        return Err(Box::new(ParseRefError {
+            msg: String::from("Oh no"),
+        }));
     }
 }
 
