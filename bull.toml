@@ -18,3 +18,8 @@ build = [
 repository_url = "https://github.com/LeopoldArkham/Dummy.git"
 branch = "master"
 build = [["echo", "test"]]
+
+[[recipes]]
+repositor_url = "https://github.com/LeopoldArkham/basic_echo.git"
+branch = "master"
+run  = ["cargo", "run"]

@@ -33,8 +33,44 @@ fn get_context_dir(name: &str) -> Result<std::path::PathBuf, Box<dyn Error>> {
 struct Repository {
     name: String,
     recipe: Recipe,
+    path: std::path::PathBuf,
     git_interface: rustygit::Repository,
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    run_handle: Option<std::process::Child>,
+}
+
+fn run_command(
+    command: &[&str],
+    dir: &std::path::PathBuf,
+) -> Result<std::process::ExitStatus, Box<dyn Error>> {
+    let status = if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        let cmd = cmd.arg("/C").args(command).current_dir(dir);
+        cmd.status()
+    } else {
+        let mut cmd = Command::new(&command[0]);
+        let cmd = cmd.args(&command[1..]).current_dir(dir);
+        cmd.status()
+    }?;
+
+    Ok(status)
+}
+
+fn spawn_command<T: AsRef<std::ffi::OsStr>>(
+    command: &[T],
+    dir: &std::path::PathBuf,
+) -> Result<std::process::Child, Box<dyn Error>> {
+    let child = if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        let cmd = cmd.arg("/C").args(command).current_dir(dir);
+        cmd.spawn()
+    } else {
+        let mut cmd = Command::new(&command[0]);
+        let cmd = cmd.args(&command[1..]).current_dir(dir);
+        cmd.spawn()
+    }?;
+
+    Ok(child)
 }
 
 impl Repository {
@@ -45,21 +81,30 @@ impl Repository {
             None => name,
         };
 
-        let path = format!("{}\\{}", "repos", name);
+        let path = std::path::PathBuf::from(format!("{}\\{}", "repos", name));
         let git_interface =
-            rustygit::Repository::clone(GitUrl::from_str(&recipe.repository_url)?, path)?;
+            rustygit::Repository::clone(GitUrl::from_str(&recipe.repository_url)?, &path)?;
         let _ = git_interface.switch_branch(&BranchName::from_str(&recipe.branch)?);
 
         Ok(Repository {
             name: name.to_string(),
+            path,
             recipe,
             git_interface,
             thread_handle: None,
+            run_handle: None,
         })
+    }
+
+    fn pull(&self) -> Result<std::process::ExitStatus, Box<dyn Error>> {
+        let status = run_command(&["git", "pull"], &self.path)?;
+        Ok(status)
     }
 
     fn deploy(&mut self) -> Result<(), Box<dyn Error>> {
         let context_dir = get_context_dir(&self.name)?;
+
+        self.pull()?;
 
         // First run all the build steps, if any
         if let Some(commands) = &self.recipe.build {
@@ -81,16 +126,22 @@ impl Repository {
 
         // Determine if we are running in "Host" or in "Run" mode
         if let Some(host_settings) = &self.recipe.host {
-            let static_files_path =
-                format!("{}\\{}", context_dir.to_str().unwrap(), host_settings.path);
-            let port = host_settings.port;
-            self.thread_handle = Some(std::thread::spawn(move || {
-                let _ = serve_static_files(port, static_files_path);
-            }));
-
+            if self.thread_handle.is_none() {
+                let static_files_path =
+                    format!("{}\\{}", context_dir.to_str().unwrap(), host_settings.path);
+                let port = host_settings.port;
+                self.thread_handle = Some(std::thread::spawn(move || {
+                    let _ = serve_static_files(port, static_files_path);
+                }));
+            }
             Ok(())
-        } else if let Some(_run_settings) = &self.recipe.run {
-            unimplemented!();
+        } else if let Some(run) = &self.recipe.run {
+            if let Some(child) = &mut self.run_handle {
+                child.kill()?;
+                self.run_handle = None;
+            }
+            self.run_handle = Some(spawn_command(run, &self.path)?);
+            Ok(())
         } else {
             unreachable!("Targets must provide either a host or a run config")
         }
