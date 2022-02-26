@@ -4,6 +4,14 @@ use std::io::prelude::*;
 use std::net::TcpListener;
 use std::process::Command;
 
+use termion::raw::IntoRawMode;
+use tui::backend::TermionBackend;
+use tui::layout::{Constraint, Direction, Layout};
+use tui::style::{Color, Style};
+use tui::text::{Span, Spans};
+use tui::widgets::{Block, Borders, Paragraph, Widget};
+use tui::Terminal;
+
 mod read_config;
 
 use serde_derive::Deserialize;
@@ -81,7 +89,7 @@ impl Repository {
             None => name,
         };
 
-        let path = std::path::PathBuf::from(format!("{}\\{}", "repos", name));
+        let path = std::path::PathBuf::from(format!("{}/{}", "repos", name));
         let git_interface =
             rustygit::Repository::clone(GitUrl::from_str(&recipe.repository_url)?, &path)?;
         let _ = git_interface.switch_branch(&BranchName::from_str(&recipe.branch)?);
@@ -231,6 +239,76 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let listener = listen_for_webhooks()?;
     println!("Listening on port 6000\n");
+
+    let _ui_thread = std::thread::spawn(|| -> Result<(), String> {
+        let stdout = std::io::stdout().into_raw_mode().unwrap();
+        let backend = TermionBackend::new(stdout);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let _ = terminal.clear();
+        let _ = terminal.autoresize();
+        let _ = terminal.hide_cursor();
+
+        let _ = terminal.draw(|frame| {
+            let split_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
+                .split(frame.size());
+
+            let box_rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+                .split(split_layout[1]);
+
+            let box_row_1 = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+                .split(box_rows[0]);
+
+            let box_row_2 = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+                .split(box_rows[1]);
+
+            let box_1 = Block::default().title("Test").borders(Borders::ALL).style(
+                Style::default()
+                    .bg(Color::Rgb(10, 18, 28))
+                    .fg(Color::Rgb(150, 208, 255)),
+            );
+            frame.render_widget(box_1, box_row_1[0]);
+
+            let box_2 = Block::default().title("Test").borders(Borders::ALL).style(
+                Style::default()
+                    .bg(Color::Rgb(10, 18, 28))
+                    .fg(Color::Rgb(150, 208, 255)),
+            );
+            frame.render_widget(box_2, box_row_1[1]);
+
+            let box_3 = Block::default().title("Test").borders(Borders::ALL).style(
+                Style::default()
+                    .bg(Color::Rgb(10, 18, 28))
+                    .fg(Color::Rgb(150, 208, 255)),
+            );
+            frame.render_widget(box_3, box_row_2[0]);
+
+            let box_4 = Block::default().title("Test").borders(Borders::ALL).style(
+                Style::default()
+                    .bg(Color::Rgb(10, 18, 28))
+                    .fg(Color::Rgb(150, 208, 255)),
+            );
+            frame.render_widget(box_4, box_row_2[1]);
+
+            let header = Block::default().title("Bull").borders(Borders::ALL).style(
+                Style::default()
+                    .bg(Color::Rgb(10, 18, 28))
+                    .fg(Color::Rgb(150, 208, 255)),
+            );
+            let paragraph =
+                Paragraph::new(vec![Spans::from("Bull is listening on port 6000")]).block(header);
+            frame.render_widget(paragraph, split_layout[0]);
+        });
+
+        Ok(())
+    });
 
     for stream in listener.incoming() {
         let target = parse_incoming_webhook(stream.unwrap())?;
