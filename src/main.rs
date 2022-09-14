@@ -8,8 +8,8 @@ use termion::raw::IntoRawMode;
 use tui::backend::TermionBackend;
 use tui::layout::{Constraint, Direction, Layout};
 use tui::style::{Color, Style};
-use tui::text::{Span, Spans};
-use tui::widgets::{Block, Borders, Paragraph, Widget};
+use tui::text::{Spans};
+use tui::widgets::{Block, Borders, Paragraph};
 use tui::Terminal;
 
 mod read_config;
@@ -172,7 +172,7 @@ fn initialize_repos(recipes: Vec<Recipe>) -> Result<Repos, Box<dyn Error>> {
 
     let mut repos: Repos = HashMap::new();
     for recipe in recipes {
-        // todo: duplicated in Reposiory impl
+        // todo: duplicated in Repository impl
         let name = recipe.repository_url.split('/').last().unwrap();
         let name = match name.strip_suffix(".git") {
             Some(s) => s,
